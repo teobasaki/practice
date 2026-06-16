@@ -11,7 +11,8 @@ name: Build and release docker image
 on:
   push:
     branches:
-      - main
+      #- main
+      - dev
 
 # workflow 전체에서 공통으로 사용할 환경 변수.
 env:

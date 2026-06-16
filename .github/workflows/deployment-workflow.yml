@@ -1,0 +1,14 @@
+name: deployment-workflow.yml
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: self-hosted # 원격지 환경에 깃허브 러너스 바로 실행
+    steps:
+    - name: Hello, World!
+      run: |
+        echo "Hello, World!" >> hello.log
