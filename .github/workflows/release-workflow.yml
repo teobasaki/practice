@@ -1,0 +1,186 @@
+# 이 workflow의 이름.
+# GitHub Actions 화면에서 보이는 이름이다.
+name: Build and release docker image
+
+# 언제 이 workflow를 실행할지 정하는 부분.
+# 현재 설정은 main 브랜치에 push가 발생했을 때만 실행된다.
+#
+# 즉:
+# - PR 올릴 때 실행 X
+# - main에 merge되거나 main에 직접 push될 때 실행 O
+on:
+  push:
+    branches:
+      - main
+
+# workflow 전체에서 공통으로 사용할 환경 변수.
+env:
+  # GitHub Container Registry 주소.
+  # Docker image를 ghcr.io에 push할 예정이다.
+  REGISTRY: ghcr.io
+
+  # Docker image 이름.
+  # github.repository는 "owner/repository" 형태다.
+  # 예: eddie1031/2026_rapa_019
+  #
+  # 최종 image 주소는:
+  # ghcr.io/eddie1031/2026_rapa_019:latest
+  IMAGE_NAME: ${{ github.repository }}
+
+# GitHub Actions가 사용할 권한.
+# GITHUB_TOKEN이 어떤 권한을 갖고 실행될지 정한다.
+#
+# contents: read
+# - repository 코드를 checkout하기 위해 필요하다.
+#
+# packages: write
+# - GHCR에 Docker image를 push하기 위해 필요하다.
+# - 네가 본 에러:
+#   "installation not allowed to Create organization package"
+#   와 직접 관련 있는 부분이다.
+#
+# attestations, id-token
+# - docker/build-push-action이 provenance 또는 build attestation 관련 작업을 할 때 사용될 수 있다.
+# - 단순 push만 할 거면 필수는 아니지만, 네 로그에 provenance 처리도 보였으므로 유지해도 된다.
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+# 같은 브랜치에서 workflow가 여러 번 겹쳐 실행되는 것을 제어한다.
+#
+# 예:
+# main에 push를 연속으로 3번 하면 workflow가 3개 생길 수 있다.
+# 배포 workflow가 동시에 여러 개 돌면
+# 오래된 코드가 나중에 push되거나 배포 순서가 꼬일 수 있다.
+#
+# cancel-in-progress: true
+# - 같은 group의 기존 실행 중인 workflow를 취소하고
+# - 가장 최신 workflow만 살린다.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Docker image를 빌드하고 GHCR에 push하는 job.
+  build-image:
+    name: 도커 이미지 빌드
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. GitHub repository 코드를 runner로 가져온다.
+      #
+      # GitHub-hosted runner는 처음에는 빈 Ubuntu 컴퓨터라고 보면 된다.
+      # 그래서 내 프로젝트 파일을 먼저 가져와야 ./gradlew, Dockerfile 등을 사용할 수 있다.
+      #
+      # actions/checkout은 repository를 $GITHUB_WORKSPACE에 checkout한다.
+      - name: 리포지터리로 체크아웃
+        uses: actions/checkout@v4
+
+      # 2. Java 설치.
+      #
+      # Spring Boot / Gradle 프로젝트를 빌드하려면 JDK가 필요하다.
+      # distribution: temurin은 Eclipse Temurin JDK를 사용한다는 뜻.
+      #
+      # java-version은 프로젝트가 실제로 사용하는 버전에 맞춰야 한다.
+      # 네 파일은 Java 25를 사용하고 있으므로 25로 유지했다.
+      - name: JDK 세팅
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      # 3. Gradle Wrapper 실행 권한 부여.
+      #
+      # GitHub Actions의 Ubuntu runner에서 gradlew 파일에 실행 권한이 없으면
+      # "./gradlew: Permission denied" 에러가 날 수 있다.
+      - name: gradlew 권한세팅
+        run: chmod +x ./gradlew
+
+      # 4. Gradle 빌드.
+      #
+      # ./gradlew build:
+      # - Java 코드 컴파일
+      # - 테스트 실행
+      # - JAR 파일 생성
+      #
+      # -x test:
+      # - 테스트는 제외하고 빌드한다.
+      #
+      # 결과물은 보통 build/libs/*.jar 아래에 생긴다.
+      # Dockerfile이 이 JAR를 복사해서 Docker image를 만들게 된다.
+      - name: Gradle 빌드
+        run: ./gradlew build -x test
+
+      # 5. GHCR 로그인.
+      #
+      # ghcr.io에 Docker image를 push하려면 로그인이 필요하다.
+      #
+      # username:
+      # - workflow를 실행한 GitHub 사용자 또는 bot.
+      #
+      # password:
+      # - GitHub Actions가 자동으로 제공하는 GITHUB_TOKEN.
+      #
+      # 단, 위 permissions에서 packages: write가 있어야 push 가능하다.
+      # organization repo라면 organization 설정에서도 package 생성 권한이 허용되어 있어야 한다.
+      - name: 레지스트리에 로그인
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 6. Docker image metadata 생성.
+      #
+      # docker/metadata-action은 Docker image의 tags와 labels를 자동 생성해준다.
+      #
+      # images:
+      # - image 이름의 기본 주소.
+      # - 예: ghcr.io/eddie1031/2026_rapa_019
+      #
+      # tags:
+      # - type=sha
+      #   커밋 SHA 기반 tag를 만든다.
+      #   예: ghcr.io/eddie1031/2026_rapa_019:sha-abc123
+      #
+      # - type=raw,value=latest
+      #   항상 latest tag도 같이 붙인다.
+      #   예: ghcr.io/eddie1031/2026_rapa_019:latest
+      - name: 메타데이터 추출
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=raw,value=latest
+
+      # 7. Docker image build & push.
+      #
+      # context: .
+      # - 현재 repository 루트를 Docker build context로 사용한다.
+      # - 즉 Dockerfile이 repository 루트에 있어야 한다.
+      #
+      # push: true
+      # - build만 하는 것이 아니라 registry에 push까지 한다.
+      #
+      # tags:
+      # - 위 metadata step에서 생성한 tag 목록을 사용한다.
+      #
+      # labels:
+      # - image에 GitHub repository, commit 등의 label 정보를 붙인다.
+      #
+      # provenance: false
+      # - 네 로그에 provenance/attestation 관련 처리가 보였는데,
+      #   GHCR 권한이나 organization 정책이 꼬인 경우 이 단계가 문제를 더 복잡하게 만들 수 있다.
+      # - 일단 단순하게 image push를 성공시키는 목적이면 false로 두는 게 편하다.
+      - name: 빌드 및 이미지 푸시
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
