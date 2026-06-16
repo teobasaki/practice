@@ -8,6 +8,5 @@ class PracticeApplicationTests {
 
     @Test
     void contextLoads() {
-        throw new RuntimeException();
     }
 }
